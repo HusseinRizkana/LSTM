@@ -31,14 +31,22 @@ class CollateFn:
         self.nlp = spacy.load("en_core_web_sm")
 
     def __call__(self, batch):
+        targets = []
+        samples = []
+        for sample, target in batch:
+            targets.append(target)
+            samples.append(sample)
+        
+        for doc in self.nlp.pipe(samples):
 
-        return torch.nn.utils.rnn.pack_sequence(
-            [
-                torch.stack([torch.from_numpy(token.vector) for token in doc])
-                for doc in self.nlp.pipe(batch[0])
-            ],
-            enforce_sorted=False,
-        ), batch[1]
+            packed = torch.nn.utils.rnn.pack_sequence(
+                [
+                    torch.stack([torch.from_numpy(token.vector) for token in doc])
+                ],
+                enforce_sorted=False,
+            )
+        return packed, torch.tensor(targets)
+
 
 
 class MedLstm(torch.nn.Module):
@@ -57,6 +65,7 @@ class MedLstm(torch.nn.Module):
         self.optimizer = optimizer
 
     def forward(self, samples):
+        print(samples.size)
         _, (h_n, _) = self.features(samples)
         reshape_last = h_n.reshape(self.features.num_layers, 2 if self.features.bidirectional else 1,
         h_n.shape[1], self.features.hidden_size)[-1]
@@ -92,11 +101,11 @@ class MedLstm(torch.nn.Module):
             accuracy_step = self.accuracy(y_preds, targets)
         return loss, accuracy_step
 
-    def training(self, epochs, train_dataset, val_dataset):
-        train_dataloader_dict = {'batch_size': 400, 'shuffle': True}
+    def run_training(self, epochs, train_dataset, val_dataset):
+        train_dataloader_dict = {'batch_size': 400, 'shuffle': True, 'collate_fn': self.collate}
         train_loader = self.dataloader(train_dataset, **train_dataloader_dict)
-        val_dataloader_dict = {'batch_size': 400}
-        val_loader = self.dataloader(val_dataset, val_dataloader_dict)
+        val_dataloader_dict = {'batch_size': 400, 'collate_fn': self.collate}
+        val_loader = self.dataloader(val_dataset, **val_dataloader_dict)
 
         for epoch in range(epochs):
             total_train_accuracy = 0
@@ -107,7 +116,7 @@ class MedLstm(torch.nn.Module):
             val_step = 0
 
             #training epoch
-            for samples, targets in self.collate(train_loader):
+            for samples, targets in train_loader:
                 samples, targets = samples.to(self.device), targets.to(self.device) # cast to device
                 train_step += 1 # count steps
                 train_loss, train_accuracy = self.train_step(samples, targets) # one training step
@@ -115,7 +124,7 @@ class MedLstm(torch.nn.Module):
                 total_train_loss += train_loss
             
             #validation epoch
-            for samples, targets in self.collate(val_loader):
+            for samples, targets in val_loader:
                 samples, targets = samples.to(self.device), targets.to(self.device) # cast to device
                 val_step += 1 
                 val_loss, val_acc = self.val_step(samples, targets) # one validation step
@@ -149,6 +158,7 @@ class MedLstm(torch.nn.Module):
 #initialising data
 test_dataset = Dataset(test)
 train_dataset = Dataset(train)
+model = MedLstm(train_dataset.n_targets)
 train_dataset, validation_dataset = torch.utils.data.random_split(
     train_dataset, [100000, 20000]
 )
@@ -164,10 +174,9 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print('running on: ', device.type)
 summaryWriter = SummaryWriter()
 loss_func = torch.nn.BCELoss()
-model = MedLstm(train_dataset.n_targets)
 optimizer = torch.optim.Adam(model.parameters(),lr=0.03)
 
 model.setup(device=device, loss_func=loss_func, collate= collate, optimizer= optimizer, tensorboard=summaryWriter)
 
-
+model.run_training(1,train_dataset,validation_dataset)
 ## initialising model
